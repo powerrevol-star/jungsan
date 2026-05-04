@@ -167,6 +167,22 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 # 4. 검증 로직
 # ─────────────────────────────────────────────
 
+# 상태값 동의어 그룹 (같은 그룹 내 값은 동일로 처리)
+STATUS_SYNONYM_GROUPS = [
+    {"실행", "정상"},
+    {"철회", "취소", "해지"},
+    {"심사중", "처리중"},
+]
+
+def normalize_status(val: str) -> str:
+    """상태값을 동의어 그룹의 대표값(첫 번째 원소)으로 정규화"""
+    v = str(val).strip()
+    for group in STATUS_SYNONYM_GROUPS:
+        if v in group:
+            return sorted(group)[0]  # 알파벳/가나다 정렬 첫 번째를 대표값으로
+    return v
+
+
 def compare_value(col: str, db_val, partner_val) -> bool:
     """두 값이 일치하는지 비교"""
     if col in ["대출금액", "지급수수료"]:
@@ -175,6 +191,8 @@ def compare_value(col: str, db_val, partner_val) -> bool:
         if pd.isna(db_val) or pd.isna(partner_val):
             return False
         return abs(float(db_val) - float(partner_val)) < 1  # 1원 미만 오차 허용
+    elif col == "상태":
+        return normalize_status(db_val) == normalize_status(partner_val)
     else:
         return str(db_val).strip() == str(partner_val).strip()
 
@@ -230,8 +248,16 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
         db_row = db_indexed.loc[key]
         pt_row = partner_indexed.loc[key]
 
+        # 상품코드 일치 여부를 먼저 확인 (상품명 비교 면제 조건)
+        db_prdt_code = str(db_row.get("대출상품코드", "")).strip()
+        pt_prdt_code = str(pt_row.get("대출상품코드", "")).strip()
+        same_product_code = (db_prdt_code == pt_prdt_code and db_prdt_code != "")
+
         col_mismatches = []
         for col in CHECK_COLS:
+            # 상품코드가 동일하면 상품명 불일치는 무시
+            if col == "대출상품명" and same_product_code:
+                continue
             db_val = db_row.get(col, "")
             pt_val = pt_row.get(col, "")
             if not compare_value(col, db_val, pt_val):
