@@ -272,9 +272,23 @@ if "result" in st.session_state:
     # ── 중복 신청번호 경고 ──
     dup_keys = result.get("duplicate_keys", [])
     if dup_keys:
-        with st.expander(f"⚠️ 중복 대출신청번호 감지 ({len(dup_keys)}건) — 첫 번째 행 기준으로 비교", expanded=True):
-            st.caption("동일한 신청번호가 제휴사 파일 또는 DB에 2건 이상 존재합니다. 비교는 첫 번째 행 기준으로 진행됩니다.")
-            st.dataframe(pd.DataFrame(dup_keys), use_container_width=True, hide_index=True)
+        with st.expander(f"⚠️ 중복 대출신청번호 감지 ({len(dup_keys)}건) — 금액 합산 후 비교", expanded=True):
+            st.caption(
+                "동일한 신청번호가 2건 이상 존재합니다. "
+                "**대출금액·지급수수료는 합산**하여 비교하며, 나머지 항목은 첫 번째 행 기준입니다."
+            )
+            df_dup = pd.DataFrame(dup_keys)
+            col_config_dup = {
+                "대출신청번호":      st.column_config.TextColumn("대출신청번호", width="medium"),
+                "DB건수":           st.column_config.NumberColumn("DB 건수", width="small"),
+                "제휴사건수":        st.column_config.NumberColumn("제휴사 건수", width="small"),
+                "DB_합산대출금액":   st.column_config.TextColumn("DB 합산대출금액", width="small"),
+                "제휴_합산대출금액": st.column_config.TextColumn("제휴 합산대출금액", width="small"),
+                "DB_합산지급수수료": st.column_config.TextColumn("DB 합산지급수수료", width="small"),
+                "제휴_합산지급수수료":st.column_config.TextColumn("제휴 합산지급수수료", width="small"),
+                "비고":             st.column_config.TextColumn("비고", width="medium"),
+            }
+            st.dataframe(df_dup, use_container_width=True, hide_index=True, column_config=col_config_dup)
 
     # ── 완전 일치 ──
     if total_mismatch == 0:

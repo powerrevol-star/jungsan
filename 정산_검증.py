@@ -197,20 +197,30 @@ def compare_value(col: str, db_val, partner_val) -> bool:
         return str(db_val).strip() == str(partner_val).strip()
 
 
-def _first_row(loc_result) -> pd.Series:
+def _merge_rows(loc_result) -> pd.Series:
     """
-    .loc[key] 결과가 DataFrame(중복 키)일 때 첫 번째 행만 Series로 반환.
-    이미 Series이면 그대로 반환.
-    중복 행은 별도로 only_in_* 혹은 mismatch 로 기록되므로 첫 행 기준 비교가 안전.
+    .loc[key] 결과가 단일 Series이면 그대로 반환.
+    중복 행(DataFrame)이면:
+      - 대출금액, 지급수수료 → 합산
+      - 나머지 컬럼 → 첫 번째 행 값 사용
+    이를 통해 추가대출 등 중복 신청번호의 합계 금액으로 비교 가능.
     """
-    if isinstance(loc_result, pd.DataFrame):
-        return loc_result.iloc[0]
-    return loc_result
+    if not isinstance(loc_result, pd.DataFrame):
+        return loc_result
+
+    AMOUNT_COLS = {"대출금액", "지급수수료"}
+    first = loc_result.iloc[0].copy()
+    for col in AMOUNT_COLS:
+        if col in loc_result.columns:
+            total = pd.to_numeric(loc_result[col], errors="coerce").sum()
+            first[col] = total if not np.isnan(total) else np.nan
+    return first
 
 
 def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
     """
-    대출신청번호를 기준으로 DB vs 제휴사 회신자료 검증
+    대출신청번호를 기준으로 DB vs 제휴사 회신자료 검증.
+    중복 신청번호는 대출금액·지급수수료를 합산하여 비교.
     Returns: 결과 딕셔너리
     """
     db_df = normalize_df(db_df)
@@ -220,7 +230,7 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
     db_indexed = db_df.set_index(db_key)
     partner_indexed = partner_df.set_index(db_key)
 
-    # 중복 신청번호: 제휴사 파일에 같은 번호가 2행 이상인 경우 별도 추적
+    # 중복 신청번호 탐지
     partner_dup_keys = set(
         partner_indexed.index[partner_indexed.index.duplicated(keep=False)]
     )
@@ -234,17 +244,30 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
     only_in_db = []         # DB에만 있음
     only_in_partner = []    # 제휴사에만 있음
     matched = []            # 완전 일치
-    duplicate_keys = []     # 중복 신청번호 (경고용)
+    duplicate_keys = []     # 중복 신청번호 정보
 
-    # 중복 키 경고 수집
+    # 중복 키 정보 수집 (합산 금액 포함)
     for key in sorted(partner_dup_keys | db_dup_keys):
-        pt_cnt = list(partner_indexed.index).count(key) if key in partner_indexed.index else 0
-        db_cnt = list(db_indexed.index).count(key) if key in db_indexed.index else 0
+        pt_rows = partner_indexed.loc[[key]] if key in partner_indexed.index else pd.DataFrame()
+        db_rows = db_indexed.loc[[key]] if key in db_indexed.index else pd.DataFrame()
+
+        pt_cnt = len(pt_rows)
+        db_cnt = len(db_rows)
+
+        pt_amt = pd.to_numeric(pt_rows.get("대출금액", pd.Series(dtype=float)), errors="coerce").sum() if not pt_rows.empty else np.nan
+        db_amt = pd.to_numeric(db_rows.get("대출금액", pd.Series(dtype=float)), errors="coerce").sum() if not db_rows.empty else np.nan
+        pt_fee = pd.to_numeric(pt_rows.get("지급수수료", pd.Series(dtype=float)), errors="coerce").sum() if not pt_rows.empty else np.nan
+        db_fee = pd.to_numeric(db_rows.get("지급수수료", pd.Series(dtype=float)), errors="coerce").sum() if not db_rows.empty else np.nan
+
         duplicate_keys.append({
             "대출신청번호": key,
             "DB건수": db_cnt,
             "제휴사건수": pt_cnt,
-            "비고": "중복 신청번호 — 첫 번째 행 기준으로 비교",
+            "DB_합산대출금액": fmt_amount(db_amt) if not np.isnan(db_amt) else "-",
+            "제휴_합산대출금액": fmt_amount(pt_amt) if not np.isnan(pt_amt) else "-",
+            "DB_합산지급수수료": fmt_amount(db_fee) if not np.isnan(db_fee) else "-",
+            "제휴_합산지급수수료": fmt_amount(pt_fee) if not np.isnan(pt_fee) else "-",
+            "비고": "금액 합산 후 비교",
         })
 
     for key in sorted(all_keys):
@@ -252,7 +275,7 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
         in_partner = key in partner_indexed.index
 
         if in_db and not in_partner:
-            row = _first_row(db_indexed.loc[key])
+            row = _merge_rows(db_indexed.loc[key])
             only_in_db.append({
                 "대출신청번호": key,
                 "DB_신청일자": row.get("신청일자", ""),
@@ -264,7 +287,7 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
             continue
 
         if in_partner and not in_db:
-            row = _first_row(partner_indexed.loc[key])
+            row = _merge_rows(partner_indexed.loc[key])
             only_in_partner.append({
                 "대출신청번호": key,
                 "제휴사_신청일자": row.get("신청일자", ""),
@@ -275,9 +298,9 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
             })
             continue
 
-        # 양쪽 모두 있는 경우 → 항목별 비교 (중복 시 첫 번째 행 기준)
-        db_row = _first_row(db_indexed.loc[key])
-        pt_row = _first_row(partner_indexed.loc[key])
+        # 양쪽 모두 있는 경우 → 항목별 비교 (중복 시 금액 합산)
+        db_row = _merge_rows(db_indexed.loc[key])
+        pt_row = _merge_rows(partner_indexed.loc[key])
 
         # 상품코드 일치 여부를 먼저 확인 (상품명 비교 면제 조건)
         db_prdt_code = str(db_row.get("대출상품코드", "")).strip()
