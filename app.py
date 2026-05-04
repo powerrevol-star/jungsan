@@ -62,10 +62,14 @@ def extract_partner_name(prompt: str, known_names: list[str]) -> str | None:
 
 
 def build_mismatch_table(mismatch_records: list) -> pd.DataFrame:
-    """불일치 명세 중첩 구조 → 플랫 DataFrame."""
+    """
+    불일치 명세 → 대출신청번호 1건 = 1행.
+    불일치 항목마다 'DB_항목명' / '제휴_항목명' 열 쌍으로 펼침.
+    """
     rows = []
     for rec in mismatch_records:
-        loan_no = rec["대출신청번호"]
+        row: dict = {"대출신청번호": rec["대출신청번호"]}
+        col_labels = []
         for item in rec["불일치항목"]:
             col = item["항목"]
             db_v = item["DB값"]
@@ -73,15 +77,30 @@ def build_mismatch_table(mismatch_records: list) -> pd.DataFrame:
             if col in ["대출금액", "지급수수료"]:
                 db_v = fmt_amount(db_v)
                 pt_v = fmt_amount(pt_v)
-            rows.append({
-                "대출신청번호": loan_no,
-                "항목": col,
-                "DB 값": str(db_v),
-                "제휴사 값": str(pt_v),
-            })
-    if rows:
-        return pd.DataFrame(rows)
-    return pd.DataFrame(columns=["대출신청번호", "항목", "DB 값", "제휴사 값"])
+            row[f"DB_{col}"] = str(db_v)
+            row[f"제휴_{col}"] = str(pt_v)
+            col_labels.append(col)
+        row["불일치항목"] = ", ".join(col_labels)
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=["대출신청번호", "불일치항목"])
+
+    df = pd.DataFrame(rows)
+
+    # 열 순서: 대출신청번호 → 불일치항목 → (DB_X, 제휴_X) 쌍 반복
+    fixed_cols = ["대출신청번호", "불일치항목"]
+    value_cols = [c for c in df.columns if c not in fixed_cols]
+    # DB_ / 제휴_ 쌍으로 정렬
+    db_cols = [c for c in value_cols if c.startswith("DB_")]
+    paired = []
+    for db_col in db_cols:
+        partner_col = db_col.replace("DB_", "제휴_")
+        paired.append(db_col)
+        if partner_col in value_cols:
+            paired.append(partner_col)
+
+    return df[fixed_cols + paired].fillna("-")
 
 
 def build_only_db_table(records: list) -> pd.DataFrame:
@@ -263,9 +282,23 @@ if "result" in st.session_state:
 
         with tab1:
             if result["mismatch_records"]:
-                st.caption("양쪽 파일에 모두 있으나 값이 다른 건")
+                st.caption("양쪽 파일에 모두 있으나 값이 다른 건 — 대출신청번호 1건 = 1행, DB / 제휴 값 비교")
                 df_mis = build_mismatch_table(result["mismatch_records"])
-                st.dataframe(df_mis, use_container_width=True, hide_index=True)
+
+                # DB_ 열은 파란색, 제휴_ 열은 주황색 헤더로 구분
+                db_cols   = [c for c in df_mis.columns if c.startswith("DB_")]
+                pt_cols   = [c for c in df_mis.columns if c.startswith("제휴_")]
+
+                col_config = {
+                    "대출신청번호": st.column_config.TextColumn("대출신청번호", width="medium"),
+                    "불일치항목":   st.column_config.TextColumn("불일치 항목", width="medium"),
+                }
+                for c in db_cols:
+                    col_config[c] = st.column_config.TextColumn(c, width="small")
+                for c in pt_cols:
+                    col_config[c] = st.column_config.TextColumn(c, width="small")
+
+                st.dataframe(df_mis, use_container_width=True, hide_index=True, column_config=col_config)
             else:
                 st.info("값 불일치 항목 없음")
 
