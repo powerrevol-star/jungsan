@@ -269,6 +269,13 @@ if "result" in st.session_state:
 
     st.markdown("---")
 
+    # ── 중복 신청번호 경고 ──
+    dup_keys = result.get("duplicate_keys", [])
+    if dup_keys:
+        with st.expander(f"⚠️ 중복 대출신청번호 감지 ({len(dup_keys)}건) — 첫 번째 행 기준으로 비교", expanded=True):
+            st.caption("동일한 신청번호가 제휴사 파일 또는 DB에 2건 이상 존재합니다. 비교는 첫 번째 행 기준으로 진행됩니다.")
+            st.dataframe(pd.DataFrame(dup_keys), use_container_width=True, hide_index=True)
+
     # ── 완전 일치 ──
     if total_mismatch == 0:
         st.success("모든 항목이 일치합니다.")

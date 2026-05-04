@@ -197,6 +197,17 @@ def compare_value(col: str, db_val, partner_val) -> bool:
         return str(db_val).strip() == str(partner_val).strip()
 
 
+def _first_row(loc_result) -> pd.Series:
+    """
+    .loc[key] 결과가 DataFrame(중복 키)일 때 첫 번째 행만 Series로 반환.
+    이미 Series이면 그대로 반환.
+    중복 행은 별도로 only_in_* 혹은 mismatch 로 기록되므로 첫 행 기준 비교가 안전.
+    """
+    if isinstance(loc_result, pd.DataFrame):
+        return loc_result.iloc[0]
+    return loc_result
+
+
 def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
     """
     대출신청번호를 기준으로 DB vs 제휴사 회신자료 검증
@@ -209,19 +220,39 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
     db_indexed = db_df.set_index(db_key)
     partner_indexed = partner_df.set_index(db_key)
 
+    # 중복 신청번호: 제휴사 파일에 같은 번호가 2행 이상인 경우 별도 추적
+    partner_dup_keys = set(
+        partner_indexed.index[partner_indexed.index.duplicated(keep=False)]
+    )
+    db_dup_keys = set(
+        db_indexed.index[db_indexed.index.duplicated(keep=False)]
+    )
+
     all_keys = set(db_indexed.index) | set(partner_indexed.index)
 
     mismatch_records = []   # 값 불일치
     only_in_db = []         # DB에만 있음
     only_in_partner = []    # 제휴사에만 있음
     matched = []            # 완전 일치
+    duplicate_keys = []     # 중복 신청번호 (경고용)
+
+    # 중복 키 경고 수집
+    for key in sorted(partner_dup_keys | db_dup_keys):
+        pt_cnt = list(partner_indexed.index).count(key) if key in partner_indexed.index else 0
+        db_cnt = list(db_indexed.index).count(key) if key in db_indexed.index else 0
+        duplicate_keys.append({
+            "대출신청번호": key,
+            "DB건수": db_cnt,
+            "제휴사건수": pt_cnt,
+            "비고": "중복 신청번호 — 첫 번째 행 기준으로 비교",
+        })
 
     for key in sorted(all_keys):
         in_db = key in db_indexed.index
         in_partner = key in partner_indexed.index
 
         if in_db and not in_partner:
-            row = db_indexed.loc[key]
+            row = _first_row(db_indexed.loc[key])
             only_in_db.append({
                 "대출신청번호": key,
                 "DB_신청일자": row.get("신청일자", ""),
@@ -233,7 +264,7 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
             continue
 
         if in_partner and not in_db:
-            row = partner_indexed.loc[key]
+            row = _first_row(partner_indexed.loc[key])
             only_in_partner.append({
                 "대출신청번호": key,
                 "제휴사_신청일자": row.get("신청일자", ""),
@@ -244,9 +275,9 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
             })
             continue
 
-        # 양쪽 모두 있는 경우 → 항목별 비교
-        db_row = db_indexed.loc[key]
-        pt_row = partner_indexed.loc[key]
+        # 양쪽 모두 있는 경우 → 항목별 비교 (중복 시 첫 번째 행 기준)
+        db_row = _first_row(db_indexed.loc[key])
+        pt_row = _first_row(partner_indexed.loc[key])
 
         # 상품코드 일치 여부를 먼저 확인 (상품명 비교 면제 조건)
         db_prdt_code = str(db_row.get("대출상품코드", "")).strip()
@@ -282,6 +313,7 @@ def run_verification(db_df: pd.DataFrame, partner_df: pd.DataFrame) -> dict:
         "mismatch_records": mismatch_records,
         "only_in_db": only_in_db,
         "only_in_partner": only_in_partner,
+        "duplicate_keys": duplicate_keys,
     }
 
 
