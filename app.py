@@ -10,6 +10,7 @@ import pandas as pd
 import tempfile
 import os
 import io
+import hashlib
 from datetime import datetime
 
 from 정산_검증 import (
@@ -41,8 +42,8 @@ def save_uploaded_file(uploaded_file) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def get_partner_names(file_bytes: bytes) -> list[str]:
-    """DB 파일에서 제휴사명 목록을 추출 (캐시)."""
+def get_partner_names(file_hash: str, file_bytes: bytes) -> list[str]:
+    """DB 파일에서 제휴사명 목록을 추출. file_hash를 캐시 키로 사용해 파일 교체 시 캐시 무효화."""
     bio = io.BytesIO(file_bytes)
     df = pd.read_excel(bio, sheet_name="대출시트", usecols=["MYDA_ORG_NM"])
     return sorted(df["MYDA_ORG_NM"].dropna().unique().tolist())
@@ -191,7 +192,9 @@ st.caption(f"기준일: {datetime.today().strftime('%Y년 %m월 %d일')}")
 
 if run_btn:
     # 제휴사명 추출
-    known_names = get_partner_names(db_file.getvalue())
+    db_bytes = db_file.getvalue()
+    db_hash = hashlib.md5(db_bytes).hexdigest()
+    known_names = get_partner_names(db_hash, db_bytes)
     partner_name = extract_partner_name(prompt, known_names)
 
     if not partner_name:
