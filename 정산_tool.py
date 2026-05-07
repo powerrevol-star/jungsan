@@ -43,7 +43,11 @@ PARTNER_COL_MAP = {
     "지급수수료":    "지급수수료",
 }
 
-CHECK_COLS = ["신청일자", "실행일자", "대출상품코드", "대출상품명", "대출금액", "상태", "지급수수료"]
+# 주요 대사 항목: 불일치 시 오류로 처리
+CHECK_COLS = ["신청일자", "대출금액", "상태", "지급수수료"]
+
+# 참고 보고 항목: 불일치 시 별도 참고 섹션으로만 표시 (오류 카운트 미포함)
+REFERENCE_COLS = ["대출상품코드", "대출상품명"]
 
 STATUS_SYNONYM_GROUPS = [
     ("실행",  frozenset({"실행", "정상", "03-기표(정상)", "기표"})),
@@ -288,6 +292,7 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
     duplicate_keys   = []
     matched          = []
     mismatch_records = []
+    ref_mismatch_records = []  # 참고 항목(상품코드/상품명) 불일치 — 오류 카운트 미포함
     only_in_db       = []
     only_in_partner  = []
 
@@ -314,7 +319,6 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
             only_in_db.append({
                 "대출신청번호":  key,
                 "신청일자":      r.get("신청일자", ""),
-                "대출상품명":    r.get("대출상품명", ""),
                 "대출금액":      _fmt_amount(r.get("대출금액")),
                 "상태":          r.get("상태", ""),
                 "지급수수료":    _fmt_amount(r.get("지급수수료")),
@@ -326,7 +330,6 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
             only_in_partner.append({
                 "대출신청번호":  key,
                 "신청일자":      r.get("신청일자", ""),
-                "대출상품명":    r.get("대출상품명", ""),
                 "대출금액":      _fmt_amount(r.get("대출금액")),
                 "상태":          r.get("상태", ""),
                 "지급수수료":    _fmt_amount(r.get("지급수수료")),
@@ -336,16 +339,9 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
         db_r = db_map[key]
         pt_r = pt_map[key]
 
-        same_code = (
-            str(db_r.get("대출상품코드", "")).strip() ==
-            str(pt_r.get("대출상품코드", "")).strip() and
-            str(db_r.get("대출상품코드", "")).strip() != ""
-        )
-
+        # ── 주요 대사 항목 검사 ──────────────────────────────
         col_mismatches = []
         for col in CHECK_COLS:
-            if col == "대출상품명" and same_code:
-                continue
             db_val = db_r.get(col, "")
             pt_val = pt_r.get(col, "")
             if not _compare_value(col, db_val, pt_val):
@@ -360,6 +356,20 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
         else:
             matched.append(key)
 
+        # ── 참고 항목 검사 (상품코드·상품명) ─────────────────
+        ref_mismatches = []
+        for col in REFERENCE_COLS:
+            db_val = db_r.get(col, "")
+            pt_val = pt_r.get(col, "")
+            if not _compare_value(col, db_val, pt_val):
+                ref_mismatches.append({
+                    "항목":    col,
+                    "DB값":    str(db_val),
+                    "제휴사값": str(pt_val),
+                })
+        if ref_mismatches:
+            ref_mismatch_records.append({"대출신청번호": key, "참고항목": ref_mismatches})
+
     return {
         "db_total":              len(db_map),
         "partner_total":         len(pt_map),
@@ -368,7 +378,9 @@ def _run_verification(db_rows: list, partner_rows: list) -> dict:
         "only_in_db_count":      len(only_in_db),
         "only_in_partner_count": len(only_in_partner),
         "duplicate_count":       len(duplicate_keys),
+        "ref_mismatch_count":    len(ref_mismatch_records),
         "mismatch_records":      mismatch_records,
+        "ref_mismatch_records":  ref_mismatch_records,
         "only_in_db":            only_in_db,
         "only_in_partner":       only_in_partner,
         "duplicate_keys":        duplicate_keys,
@@ -407,18 +419,21 @@ def _format_report(affiliate: str, settlement_month: str, result: dict) -> str:
 
     # ── 요약 테이블 ────────────────────────────────────────
     lines.append("## 요약")
-    lines.append(_md_table(
-        ["구분", "건수"],
-        [
-            {"구분": "제휴사 회신자료 총 건수",    "건수": f"{result['partner_total']}건"},
-            {"구분": "DB 자료 총 건수",            "건수": f"{result['db_total']}건"},
-            {"구분": "완전 일치",                  "건수": f"{result['matched_count']}건"},
-            {"구분": "불일치 합계",                "건수": f"{total_mis}건"},
-            {"구분": "┣ 값 불일치 (양쪽 존재)",   "건수": f"{result['mismatch_count']}건"},
-            {"구분": "┣ DB에만 존재",              "건수": f"{result['only_in_db_count']}건"},
-            {"구분": "┗ 제휴사 회신에만 존재",     "건수": f"{result['only_in_partner_count']}건"},
-        ]
-    ))
+    summary_rows = [
+        {"구분": "제휴사 회신자료 총 건수",               "건수": f"{result['partner_total']}건"},
+        {"구분": "DB 자료 총 건수",                       "건수": f"{result['db_total']}건"},
+        {"구분": "완전 일치",                              "건수": f"{result['matched_count']}건"},
+        {"구분": "불일치 합계 (주요 대사 기준)",           "건수": f"{total_mis}건"},
+        {"구분": "┣ 값 불일치 (양쪽 존재)",               "건수": f"{result['mismatch_count']}건"},
+        {"구분": "┣ DB에만 존재",                         "건수": f"{result['only_in_db_count']}건"},
+        {"구분": "┗ 제휴사 회신에만 존재",                "건수": f"{result['only_in_partner_count']}건"},
+    ]
+    if result.get("ref_mismatch_count", 0) > 0:
+        summary_rows.append({
+            "구분": "※ 참고) 상품코드·상품명 불일치 (대사 제외)",
+            "건수": f"{result['ref_mismatch_count']}건",
+        })
+    lines.append(_md_table(["구분", "건수"], summary_rows))
     lines.append("")
 
     # ── 중복 신청번호 ──────────────────────────────────────
@@ -467,7 +482,7 @@ def _format_report(affiliate: str, settlement_month: str, result: dict) -> str:
     if result["only_in_db"]:
         lines.append(f"## DB에만 존재 — 제휴사 회신 누락 ({result['only_in_db_count']}건)")
         lines.append(_md_table(
-            ["대출신청번호", "신청일자", "대출상품명", "대출금액", "상태", "지급수수료"],
+            ["대출신청번호", "신청일자", "대출금액", "상태", "지급수수료"],
             result["only_in_db"]
         ))
         lines.append("")
@@ -476,9 +491,26 @@ def _format_report(affiliate: str, settlement_month: str, result: dict) -> str:
     if result["only_in_partner"]:
         lines.append(f"## 제휴사에만 존재 — DB 미등록 ({result['only_in_partner_count']}건)")
         lines.append(_md_table(
-            ["대출신청번호", "신청일자", "대출상품명", "대출금액", "상태", "지급수수료"],
+            ["대출신청번호", "신청일자", "대출금액", "상태", "지급수수료"],
             result["only_in_partner"]
         ))
+        lines.append("")
+
+    # ── 참고: 상품코드·상품명 불일치 ──────────────────────
+    if result.get("ref_mismatch_records"):
+        lines.append(f"## [참고] 대출상품코드·상품명 불일치 ({result['ref_mismatch_count']}건)")
+        lines.append("> 아래 항목은 주요 대사에서 제외되었으나 상품 정보 차이가 있어 참고용으로 제공합니다.")
+        flat_ref = []
+        for rec in result["ref_mismatch_records"]:
+            loan_no = rec["대출신청번호"]
+            for i, mis in enumerate(rec["참고항목"]):
+                flat_ref.append({
+                    "대출신청번호": loan_no if i == 0 else "",
+                    "항목":         mis["항목"],
+                    "DB값":         mis["DB값"],
+                    "제휴사값":     mis["제휴사값"],
+                })
+        lines.append(_md_table(["대출신청번호", "항목", "DB값", "제휴사값"], flat_ref))
         lines.append("")
 
     return "\n".join(lines)
